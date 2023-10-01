@@ -2,7 +2,7 @@ import pytest
 import equinox as eqx
 from equinox import nn
 from jaxtyping import Array, PRNGKeyArray
-from eqxamp import MixedTypes, amp, DynamicScalarState, dynamic_scale_tx
+from eqxamp import MixedTypes, amp, DynamicScalarState, dynamic_scale_grad, dynamic_scale_value_and_grad
 import jax
 from jax import numpy as jnp
 from jax.random import PRNGKey, split
@@ -139,55 +139,93 @@ def test_amp():
     assert jnp.allclose(half_out, amp_half_out)
     assert not jnp.allclose(full_out, half_out)
 
+@pytest.mark.parametrize("tx", ["grad", "value_and_grad"])
+@pytest.mark.parametrize("f", [True, False])
+@pytest.mark.parametrize("aux", [True, False])
+def test_dynamic_scalar(tx, f, aux):
 
-def test_dynamic_scalar():
+    if tx == "grad":
+        transform = dynamic_scale_grad
+    elif tx == "value_and_grad":
+        transform = dynamic_scale_value_and_grad
     def func(x):
+        if aux:
+            return x**3, 1.0
         return x**3
 
-    for tx in [jax.grad, jax.value_and_grad]:
-        x = jnp.array(2.0, dtype=jnp.float16)
+    x = jnp.array(2.0, dtype=jnp.float16)
 
-        scalar_state = DynamicScalarState(scalar=2**15, patience=10)
-        grad_fn = jax.jit(dynamic_scale_tx(tx, redo_on_nan=100)(func))
-        g, scalar_state = grad_fn(x, dynamic_scalar_state=scalar_state)
+    scalar_state = DynamicScalarState(scalar=2**15, patience=10)
+    grad_fn = jax.jit(transform(func, filter=f, has_aux=aux, redo_on_nan=100))
+    scalar_state, g = grad_fn(x, dynamic_scalar_state=scalar_state)
+    if tx == "value_and_grad" and aux:
+        (v, a), g = g
+    if tx == "value_and_grad" and not aux:
+        v, g = g
+    if tx == "grad" and aux:
+        g, a = g
+    if aux:
+        assert jnp.allclose(a, 1.0)
+    if tx == "value_and_grad":
+        assert jnp.allclose(v, 8.0)
+    assert jnp.allclose(g, 12.0)
+    assert jnp.allclose(scalar_state.scalar, 2**12)
+    assert jnp.allclose(scalar_state.count, 1.0)
+
+    for i in range(9):
+        scalar_state, g = grad_fn(x, dynamic_scalar_state=scalar_state)
         assert jnp.allclose(scalar_state.scalar, 2**12)
-        assert jnp.allclose(scalar_state.count, 1.0)
+        assert jnp.allclose(scalar_state.count, i + 2.0)
+        if tx == "value_and_grad" and aux:
+            (v, a), g = g
+        if tx == "value_and_grad" and not aux:
+            v, g = g
+        if tx == "grad" and aux:
+            g, a = g
 
-        for i in range(9):
-            g, scalar_state = grad_fn(x, dynamic_scalar_state=scalar_state)
-            assert jnp.allclose(scalar_state.scalar, 2**12)
-            assert jnp.allclose(scalar_state.count, i + 2.0)
-            if tx == jax.value_and_grad:
-                assert jnp.allclose(g[0], 8.0)
-                g = g[1]
-            assert jnp.allclose(g, 12.0)
+        if aux:
+            assert jnp.allclose(a, 1.0)
+        if tx == "value_and_grad":
+            assert jnp.allclose(v, 8.0)
 
-        g, scalar_state = grad_fn(x, dynamic_scalar_state=scalar_state)
-        assert jnp.allclose(scalar_state.scalar, 2**13)
-        assert jnp.allclose(scalar_state.count, 0.0)
-
-        g, scalar_state = grad_fn(x, dynamic_scalar_state=scalar_state)
-        assert jnp.allclose(scalar_state.scalar, 2**12)
-        assert jnp.allclose(scalar_state.count, 1.0)
-
-        scalar_state = DynamicScalarState(scalar=2**15)
-        grad_fn = jax.jit(dynamic_scale_tx(tx, redo_on_nan=0)(func))
-        g, scalar_state = grad_fn(x, dynamic_scalar_state=scalar_state)
-        assert jnp.allclose(scalar_state.scalar, 2**14)
-        assert jnp.allclose(scalar_state.count, 0.0)
-
-        g, scalar_state = grad_fn(x, dynamic_scalar_state=scalar_state)
-        assert jnp.allclose(scalar_state.scalar, 2**13)
-        assert jnp.allclose(scalar_state.count, 0.0)
-
-        g, scalar_state = grad_fn(x, dynamic_scalar_state=scalar_state)
-        assert jnp.allclose(scalar_state.scalar, 2**12)
-        assert jnp.allclose(scalar_state.count, 0.0)
-
-        g, scalar_state = grad_fn(x, dynamic_scalar_state=scalar_state)
-        assert jnp.allclose(scalar_state.scalar, 2**12)
-        assert jnp.allclose(scalar_state.count, 1.0)
-        if tx == jax.value_and_grad:
-            assert jnp.allclose(g[0], 8.0)
-            g = g[1]
         assert jnp.allclose(g, 12.0)
+
+    scalar_state, g = grad_fn(x, dynamic_scalar_state=scalar_state)
+    assert jnp.allclose(scalar_state.scalar, 2**13)
+    assert jnp.allclose(scalar_state.count, 0.0)
+
+    scalar_state, g = grad_fn(x, dynamic_scalar_state=scalar_state)
+    assert jnp.allclose(scalar_state.scalar, 2**12)
+    assert jnp.allclose(scalar_state.count, 1.0)
+
+    scalar_state = DynamicScalarState(scalar=2**15)
+    grad_fn = jax.jit(transform(func, filter=f, has_aux=aux, redo_on_nan=0))
+    scalar_state, g = grad_fn(x, dynamic_scalar_state=scalar_state)
+    assert jnp.allclose(scalar_state.scalar, 2**14)
+    assert jnp.allclose(scalar_state.count, 0.0)
+
+    scalar_state, g = grad_fn(x, dynamic_scalar_state=scalar_state)
+    assert jnp.allclose(scalar_state.scalar, 2**13)
+    assert jnp.allclose(scalar_state.count, 0.0)
+
+    scalar_state, g = grad_fn(x, dynamic_scalar_state=scalar_state)
+    assert jnp.allclose(scalar_state.scalar, 2**12)
+    assert jnp.allclose(scalar_state.count, 0.0)
+
+    scalar_state, g = grad_fn(x, dynamic_scalar_state=scalar_state)
+    assert jnp.allclose(scalar_state.scalar, 2**12)
+    assert jnp.allclose(scalar_state.count, 1.0)
+
+    if tx == "value_and_grad" and aux:
+        (v, a), g = g
+    if tx == "value_and_grad" and not aux:
+        v, g = g
+    if tx == "grad" and aux:
+        g, a = g
+
+    if aux:
+        assert jnp.allclose(a, 1.0)
+    if tx == "value_and_grad":
+        assert jnp.allclose(v, 8.0)
+
+    assert jnp.allclose(g, 12.0)

@@ -153,23 +153,6 @@ def amp(
     return with_mixed_precision(orig_module, recurse_fn=recurse_fn, **asdict(mp_types))
 
 
-class M(eqx.Module):
-    l1: eqx.nn.Linear
-    l2: eqx.nn.Linear
-    nm: eqx.nn.LayerNorm
-    p: jax.Array
-
-    def __init__(self, n: int, key: jrandom.PRNGKey):
-        keys = jrandom.split(key, 3)
-        self.l1 = eqx.nn.Linear(1, n, key=keys[0])
-        self.nm = nn.LayerNorm(n)
-        self.l2 = eqx.nn.Linear(n, 1, key=keys[2])
-        self.p = jnp.ones(4)
-
-    def __call__(self, x):
-        return self.l2(self.nm(self.l1(x)))
-
-
 AMP_OVERRIDES = {
     nn.LayerNorm: full_precision,
     nn.GroupNorm: full_precision,
@@ -209,12 +192,44 @@ def decrease_scalar(state):
     return DynamicScalarState(state.patience, state.adjust_factor, state.scalar / state.adjust_factor, 0.0)
 
 
-def dynamic_scale_tx(transform: Callable[Any, Any], redo_on_nan: int = 0):
+def default_unscale_fn(results: Any, state: DynamicScalarState) -> Any:
+    return jtu.tree_map(lambda x: x.astype(state.scalar.dtype) / state.scalar, results)
+
+
+def value_and_grad_aux_unscale_fn(results: Any, state: DynamicScalarState) -> Any:
+    (value, aux), grad = results
+    value = default_unscale_fn(value, state)
+    grad = default_unscale_fn(grad, state)
+    return (value, aux), grad
+
+
+def grad_aux_unscale_fn(results: Any, state: DynamicScalarState) -> Any:
+    grad, aux = results
+    grad = default_unscale_fn(grad, state)
+    return grad, aux
+
+
+def default_scale_fn(result: Any, state: DynamicScalarState) -> Any:
+    if not eqx.is_array_like(result):
+        value, aux = result
+        value = state.scalar.astype(value.dtype) * value
+        result = (value, aux)
+    else:
+        result = result * state.scalar.astype(result.dtype)
+    return result
+
+
+def dynamic_scale_tx(
+    transform: Callable[Any, Any],
+    redo_on_nan: int = 0,
+    unscale_fn: Callable = default_unscale_fn,
+    scale_fn: Callable = default_scale_fn,
+):
     def scaled_transform(fun, *args, **kwargs):
         @wraps(fun)
-        def scaled_fun(*f_args, dynamic_scalar_state: DynamicScalarState, **f_kwargs):
+        def scaled_fun(*f_args, _dynamic_scalar_state: DynamicScalarState, **f_kwargs):
             result = fun(*f_args, **f_kwargs)
-            return result * dynamic_scalar_state.scalar.astype(result.dtype)
+            return scale_fn(result, _dynamic_scalar_state)
 
         transformed_fn = transform(scaled_fun, *args, **kwargs)
 
@@ -223,13 +238,13 @@ def dynamic_scale_tx(transform: Callable[Any, Any], redo_on_nan: int = 0):
             # with raw python ints/floats
             state = jtu.tree_map(lambda x: jnp.array(x).astype(jnp.float32), dynamic_scalar_state)
 
-            results = transformed_fn(*f_args, dynamic_scalar_state=state, **f_kwargs)
+            results = transformed_fn(*f_args, _dynamic_scalar_state=state, **f_kwargs)
 
-            results = jtu.tree_map(lambda x: x.astype(state.scalar.dtype) / state.scalar, results)
+            results = unscale_fn(results, state)
 
             new_state = jax.lax.cond(all_finite(results), increment_state, decrease_scalar, state)
 
-            return results, new_state
+            return new_state, results
 
         if redo_on_nan == 0:
             return maybe_adjust_scalar
@@ -237,32 +252,79 @@ def dynamic_scale_tx(transform: Callable[Any, Any], redo_on_nan: int = 0):
         def adjust_scalar_until_finite(*f_args, dynamic_scalar_state: DynamicScalarState, **f_kwargs):
             redo_count = jnp.array(0, jnp.int32)
 
-            results, new_state = maybe_adjust_scalar(*f_args, dynamic_scalar_state=dynamic_scalar_state, **f_kwargs)
+            new_state, results = maybe_adjust_scalar(*f_args, dynamic_scalar_state=dynamic_scalar_state, **f_kwargs)
 
-            init_val = (results, new_state, redo_count)
+            init_val = (new_state, results, redo_count)
 
-            def cond_fun(results__state__redo_count):
-                results, state, redo_count = results__state__redo_count
+            def cond_fun(state__results__redo_count):
+                state, results, redo_count = state__results__redo_count
                 return jnp.logical_and(jnp.logical_not(all_finite(results)), redo_count < redo_on_nan)
 
-            def body_fun(results__state__redo_count):
-                results, state, redo_count = results__state__redo_count
-                results, state = maybe_adjust_scalar(*f_args, dynamic_scalar_state=state, **f_kwargs)
-                return (results, state, redo_count + 1)
+            def body_fun(state__results__redo_count):
+                state, results, redo_count = state__results__redo_count
+                state, results = maybe_adjust_scalar(*f_args, dynamic_scalar_state=state, **f_kwargs)
+                return (state, results, redo_count + 1)
 
-            results, new_state, redo_count = jax.lax.while_loop(
+            new_state, results, redo_count = jax.lax.while_loop(
                 cond_fun=cond_fun,
                 body_fun=body_fun,
                 init_val=init_val,
             )
-            return results, new_state
+            return new_state, results
 
         return adjust_scalar_until_finite
 
     return scaled_transform
 
 
+def dynamic_scale_grad(fun: Callable, *, has_aux: bool = False, redo_on_nan: bool = 10, filter=True, **kwargs):
+    if has_aux:
+        unscale_fn = grad_aux_unscale_fn
+    else:
+        unscale_fn = default_unscale_fn
+
+    if filter:
+        tx = eqx.filter_grad
+    else:
+        tx = jax.grad
+
+    grad_fn = dynamic_scale_tx(tx, redo_on_nan=redo_on_nan, unscale_fn=unscale_fn)(fun, has_aux=has_aux, **kwargs)
+    return grad_fn
+
+
+def dynamic_scale_value_and_grad(
+    fun: Callable, *, has_aux: bool = False, redo_on_nan: bool = 10, filter=True, **kwargs
+):
+    if has_aux:
+        unscale_fn = value_and_grad_aux_unscale_fn
+    else:
+        unscale_fn = default_unscale_fn
+    if filter:
+        tx = eqx.filter_value_and_grad
+    else:
+        tx = jax.value_and_grad
+
+    grad_fn = dynamic_scale_tx(tx, redo_on_nan=redo_on_nan, unscale_fn=unscale_fn)(fun, has_aux=has_aux, **kwargs)
+    return grad_fn
+
+
 if __name__ == '__main__':
+
+    class M(eqx.Module):
+        l1: eqx.nn.Linear
+        l2: eqx.nn.Linear
+        nm: eqx.nn.LayerNorm
+        p: jax.Array
+
+        def __init__(self, n: int, key: jrandom.PRNGKey):
+            keys = jrandom.split(key, 3)
+            self.l1 = eqx.nn.Linear(1, n, key=keys[0])
+            self.nm = nn.LayerNorm(n)
+            self.l2 = eqx.nn.Linear(n, 1, key=keys[2])
+            self.p = jnp.ones(4)
+
+        def __call__(self, x):
+            return self.l2(self.nm(self.l1(x)))
 
     def cast_x(x):
         return x.astype(jnp.float16)

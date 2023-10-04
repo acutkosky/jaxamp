@@ -59,15 +59,17 @@ def with_mixed_precision(
     def cast_child(child: PyTree) -> PyTree:
         if isinstance(child, MixedPrecisionWrapper):
             raise TypeError("Attempting to apply mixed precision to a module that already has mixed precision applied!")
+        # if isinstance(child, eqx.nn.StateIndex):
+        #     return child
 
-        if isinstance(child, eqx.Module):
+        if isinstance(child, eqx.Module) and callable(child):
             if recurse_fn:
                 return recurse_fn(child)
             else:
                 return child
 
-        if callable(child):
-            return MixedPrecisionWrapper(child, output_type, storage_type, compute_type)
+        # if callable(child):
+        #     return MixedPrecisionWrapper(child, output_type, storage_type, compute_type)
         return cast_tree(storage_type, child)
 
     casted_module = cast_module(orig_module, cast_child)
@@ -98,11 +100,14 @@ class MixedPrecisionWrapper(eqx.Module):
 
     def __call__(self, *args, **kwargs) -> Any:
         def cast_child(child: PyTree) -> PyTree:
-            if isinstance(child, eqx.Module):
+            if isinstance(child, eqx.Module) and callable(child):
                 return child
 
-            if callable(child):
-                return MixedPrecisionWrapper(child, self.output_type, self.storage_type, self.compute_type)
+            # if isinstance(child, eqx.nn.StateIndex):
+            #     return child
+
+            # if callable(child):
+            #     return MixedPrecisionWrapper(child, self.output_type, self.storage_type, self.compute_type)
             return cast_tree(self.compute_type, child)
 
         module = cast_module(self._original_module, cast_child)

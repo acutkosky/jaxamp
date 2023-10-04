@@ -2,13 +2,22 @@ import pytest
 import equinox as eqx
 from equinox import nn
 from jaxtyping import Array, PRNGKeyArray
-from eqxamp import MixedTypes, amp, DynamicScalarState, dynamic_scale_grad, dynamic_scale_value_and_grad
+from eqxamp import (
+    MixedTypes,
+    amp,
+    DynamicScalarState,
+    dynamic_scale_grad,
+    dynamic_scale_value_and_grad,
+    amp_stop,
+    # amp_pause,
+)
 import jax
 from jax import numpy as jnp
 from jax.random import PRNGKey, split
 from jax import tree_util as jtu
 import ml_dtypes
 from typing import Callable
+from ml_dtypes import bfloat16
 
 
 class MP_Linear(nn.Linear):
@@ -36,9 +45,55 @@ class MP_Linear(nn.Linear):
 
         x = x.astype(self.types.compute_type)
         result = nn.Linear.__call__(compute_module, x)
-        print("result dtype: ", result.dtype)
-        result = self.square(result)
+        # print("result dtype: ", result.dtype)
+        # result = result.astype(jnp.float32)
+        # result = self.square(result)
         return result.astype(self.types.output_type)
+
+
+class HalfLinear(eqx.Module):
+    l1: nn.Linear
+
+    def __init__(self, in_features, out_features, *, key):
+        self.l1 = nn.Linear(in_features, out_features, use_bias=True, key=key)
+        # print("l1: ", self.l1)
+
+    def __call__(self, x, *, key=None):
+        l1 = eqx.tree_at(lambda tree: (tree.weight, tree.bias), self.l1, replace_fn=lambda x: x.astype(bfloat16))
+        # print("self.l1 weight: ", self.l1.weight)
+        # print("l1 weight: ", l1.weight)
+        x = x.astype(bfloat16)
+        y = l1(x)
+        return y.astype(jnp.float32)
+
+
+class StopBiasLinear(eqx.Module):
+    l1: nn.Linear
+
+    def __init__(self, in_features, out_features, *, key):
+        self.l1 = nn.Linear(in_features, out_features, use_bias=True, key=key)
+        # print("l1: ", self.l1)
+
+    def __call__(self, x, *, key=None):
+        y = self.l1.weight @ x
+        with amp_stop():
+            y = y + self.l1.bias
+        return y
+
+class HalfWeightLinear(eqx.Module):
+    l1: nn.Linear
+
+    def __init__(self, in_features, out_features, *, key):
+        self.l1 = nn.Linear(in_features, out_features, use_bias=True, key=key)
+        # print("l1: ", self.l1)
+
+    def __call__(self, x, *, key=None):
+        l1 = eqx.tree_at(lambda tree: (tree.weight), self.l1, replace_fn=lambda x: x.astype(bfloat16))
+        # print("self.l1 weight: ", self.l1.weight)
+        # print("l1 weight: ", l1.weight)
+        x = x.astype(bfloat16)
+        y = l1(x)
+        return y.astype(jnp.float32)
 
 
 class HalfLinearLN(eqx.Module):
@@ -52,7 +107,7 @@ class HalfLinearLN(eqx.Module):
 
     def __call__(self, x, *, key=None):
         x = self.l1(x)
-        x = self.ln(x)
+        # x = self.ln(x)
         return x
 
 
@@ -88,8 +143,8 @@ class FullLinearLN(eqx.Module):
 
     def __call__(self, x):
         x = self.l1(x)
-        x = self.square(x)
-        x = self.ln(x)
+        # x = self.square(x)
+        # x = self.ln(x)
         return x
 
 
@@ -111,43 +166,63 @@ class FullNet(eqx.Module):
     @jax.jit
     def __call__(self, x, key=None):
         x = self.l1(x)
-        x = self.square1(x)
+        # x = self.square1(x)
         x = self.h(x)
         x = self.l2(x)
-        x = self.square2(x)
+        # x = self.square2(x)
         return x
 
 
-def test_amp():
+def test_linear_amp():
     key = PRNGKey(0)
-    half = HalfNet(key)
-    full = FullNet(key)
+    half = HalfLinear(2, 10, key=key)  # HalfNet(key)
+    full = nn.Linear(2, 10, use_bias=True, key=key)
+    bias_stopped = StopBiasLinear(2,10, key=key)
+    half_weight = HalfWeightLinear(2, 10, key=key)
+    # full = FullNet(key)
     amp_full = amp(full)
     amp_half = amp(half)
+    amp_stopped = amp(amp_stop(full))
+    amp_bias_stopped = amp(bias_stopped)
+    
 
-    x = jnp.array([5.0])
+    x = jnp.array([5.0, 2.0])
 
+    amp_stopped_out = amp_stopped(x)
+    amp_bias_out = amp_bias_stopped(x)
+    half_weight_out = half_weight(x)
+    bias_out = bias_stopped(x)
     half_out = half(x)
     amp_full_out = amp_full(x)
     full_out = full(x)
     amp_half_out = amp_half(x)
 
-    print(half_out)
-    print(amp_full_out)
+    # print(half_out)
+    # print(amp_full_out)
+    # print(full_out)
+    # print(amp_stopped_out)
 
     assert jnp.allclose(half_out, amp_full_out)
     assert jnp.allclose(half_out, amp_half_out)
+    assert jnp.allclose(half_weight_out, amp_bias_out)
+    assert jnp.allclose(bias_out, full_out)
     assert not jnp.allclose(full_out, half_out)
+    assert jnp.allclose(full_out, amp_stopped_out)
+
+
+def test_amp_stop():
+    key = PRNGKey(0)
+
 
 @pytest.mark.parametrize("tx", ["grad", "value_and_grad"])
 @pytest.mark.parametrize("f", [True, False])
 @pytest.mark.parametrize("aux", [True, False])
 def test_dynamic_scalar(tx, f, aux):
-
     if tx == "grad":
         transform = dynamic_scale_grad
     elif tx == "value_and_grad":
         transform = dynamic_scale_value_and_grad
+
     def func(x):
         if aux:
             return x**3, 1.0

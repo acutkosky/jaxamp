@@ -14,7 +14,6 @@ from jax import lax
 from jax._src.util import safe_map
 
 
-
 def all_finite(tree: PyTree) -> jax.Array:
     # from JMP
     leaves = jtu.tree_leaves(tree)
@@ -31,7 +30,7 @@ class DynamicScalarState(NamedTuple):
     count: jax.Array = jnp.array(0)
 
 
-def increment_state(state):
+def increment_state(state: DynamicScalarState) -> DynamicScalarState:
     new_state = jax.lax.cond(
         state.count >= state.patience,
         lambda state: DynamicScalarState(state.patience, state.adjust_factor, state.scalar * state.adjust_factor, 0.0),
@@ -42,7 +41,7 @@ def increment_state(state):
     return new_state
 
 
-def decrease_scalar(state):
+def decrease_scalar(state: DynamicScalarState) -> DynamicScalarState:
     return DynamicScalarState(state.patience, state.adjust_factor, state.scalar / state.adjust_factor, 0.0)
 
 
@@ -160,4 +159,3 @@ def dynamic_scale_value_and_grad(
 
     grad_fn = dynamic_scale_tx(tx, redo_on_nan=redo_on_nan, unscale_fn=unscale_fn)(fun, has_aux=has_aux, **kwargs)
     return grad_fn
-

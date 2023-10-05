@@ -1,7 +1,7 @@
 import pytest
 import equinox as eqx
 from equinox import nn
-from jaxtyping import Array, PRNGKeyArray
+from jaxtyping import PRNGKeyArray
 from eqxamp import (
     amp,
     DynamicScalarState,
@@ -10,14 +10,10 @@ from eqxamp import (
     amp_stop,
     default_amp_policy,
     use_original_precision,
-    # amp_pause,
 )
 import jax
 from jax import numpy as jnp
-from jax.random import PRNGKey, split
-from jax import tree_util as jtu
-import ml_dtypes
-from typing import Callable
+from jax.random import PRNGKey
 from ml_dtypes import bfloat16
 
 
@@ -46,6 +42,7 @@ class StopBiasLinear(eqx.Module):
             y = y + self.l1.bias
         return y
 
+
 class HalfWeightLinear(eqx.Module):
     l1: nn.Linear
 
@@ -62,12 +59,11 @@ class HalfWeightLinear(eqx.Module):
         return y.astype(jnp.float32)
 
 
-
 def test_linear_amp():
     key = PRNGKey(0)
     half = HalfLinear(2, 10, key=key)  # HalfNet(key)
     full = nn.Linear(2, 10, use_bias=True, key=key)
-    bias_stopped = StopBiasLinear(2,10, key=key)
+    bias_stopped = StopBiasLinear(2, 10, key=key)
     half_weight = HalfWeightLinear(2, 10, key=key)
     # full = FullNet(key)
     amp_full = amp(full)
@@ -75,7 +71,6 @@ def test_linear_amp():
     amp_stopped = amp(amp_stop(full))
     amp_bias_stopped = amp(bias_stopped)
     amp_no_linear = amp(full, amp_policy=default_amp_policy | {'eqx.nn.Linear': use_original_precision})
-    
 
     x = jnp.array([5.0, 2.0])
 
@@ -97,26 +92,27 @@ def test_linear_amp():
     assert jnp.allclose(full_out, amp_stopped_out)
     assert jnp.allclose(full_out, amp_no_linear_out)
 
+
 def test_static():
     key = PRNGKey(0)
-    bn, state = eqx.nn.make_with_state(eqx.nn.BatchNorm)(2, axis_name="batch")#, key=key)
+    bn, state = eqx.nn.make_with_state(eqx.nn.BatchNorm)(2, axis_name="batch")  # , key=key)
+
     def get_batch_value(bn, state, data):
         ans, state = bn(data, state)
         return ans, state
-    
+
     def get_value(bn, state, data):
         vmap_value = jax.vmap(get_batch_value, axis_name="batch", in_axes=(None, None, 0), out_axes=(0, None))
         return vmap_value(bn, state, data)
 
     amp_get_value = amp(get_value)
 
-    data = jnp.ones((3,2, 4))
+    data = jnp.ones((3, 2, 4))
     value, _ = get_value(bn, state, data)
     amp_value, _ = amp_get_value(bn, state, data)
 
     # with all ones there will be no floating point error
     assert jnp.allclose(value, amp_value)
-
 
 
 @pytest.mark.parametrize("tx", ["grad", "value_and_grad"])

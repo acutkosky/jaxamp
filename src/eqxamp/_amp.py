@@ -1,51 +1,91 @@
-import numpy as np
 import jax
 import jax.numpy as jnp
-from jax import jit, grad, vmap
-from jax import random
 from functools import wraps
 
-from jax import core
 from jax import lax
 from jax._src.util import (
-    safe_zip,
     safe_map,
     curry,
-    tuple_insert,
-    tuple_delete,
-    as_hashable_function,
-    HashableFunction,
-    HashableWrapper,
-    weakref_lru_cache,
-    partition_list,
 )
-from jax._src.core import Jaxpr, Atom, Literal, Var, last_used, clean_up_dead_vars, eval_jaxpr
+from jax._src.core import Jaxpr, Atom, Literal, Var, last_used, clean_up_dead_vars
 from jax._src import source_info_util
-from typing import Any, Callable, ClassVar, DefaultDict, Generic, NamedTuple, TypeVar, Union, cast, overload
+from typing import (
+    Any,
+    Callable,
+    ClassVar,
+    DefaultDict,
+    Generic,
+    NamedTuple,
+    TypeVar,
+    Union,
+    Sequence,
+    Type,
+    Dict,
+    Optional,
+    cast,
+    overload,
+)
 from types import MappingProxyType
 from collections import defaultdict
 import ml_dtypes
 import equinox as eqx
+from jaxtyping import PyTree
 from jax import tree_util as jtu
-from contextlib import contextmanager
 
-zip, unsafe_zip = safe_zip, zip
 map, unsafe_map = safe_map, map
 
+precision_ordering = [
+    jnp.float64,
+    jnp.float32,
+    ml_dtypes.bfloat16,
+    jnp.float16,
+]
 
-def use_original_precision(compute_dtype, *invars, **bind_params):
-    return invars, bind_params
+
+def find_widest_dtype(dtype_list: Sequence[Type]) -> Type:
+    for dtype in precision_ordering:
+        if dtype in dtype_list:
+            return dtype
+
+    return dtype_list[0]
 
 
-@curry
-def cast_if_float(dtype, value):
+def use_original_precision(
+    compute_dtype: Type, original_dtypes: Sequence[Type], *invars: Sequence[Any], **bind_params: Dict[str, Any]
+) -> (Sequence[Any], Dict[str, Any]):
+    return [cast_if_float(dtype, inv) for inv, dtype in zip(invars, original_dtypes)], bind_params
+
+
+def use_widest_precision(
+    compute_dtype: Type, original_dtypes: Sequence[Type], *invars: Sequence[Any], **bind_params: Dict[str, Any]
+) -> (Sequence[Any], Dict[str, Any]):
+    dtype = find_widest_dtype(original_dtypes)
+    return use_compute_precision(dtype, original_dtypes, *invars, **bind_params)
+
+
+def cast_if_float(dtype: Type, value: Any) -> Any:
     if eqx.is_inexact_array(value):
-        return value.astype(dtype)
+        if value.dtype != dtype:
+            return value.astype(dtype)
     return value
 
 
-def use_low_precision(compute_dtype, *invars, **bind_params):
-    invars = map(cast_if_float(compute_dtype), invars)
+def cast_tree(dtype: Type, tree: PyTree) -> PyTree:
+    return jtu.tree_map(lambda v: cast_if_float(dtype, v), tree)
+
+
+def use_precision(override_dtype: Type) -> Callable:
+    def overridden_precision(compute_dtype, *args, **kwargs):
+        return use_compute_precision(override_dtype, *args, **kwargs)
+
+    return overridden_precision
+
+
+def use_compute_precision(
+    compute_dtype: Type, original_dtypes: Sequence[Type], *invars: Sequence[Any], **bind_params: Dict[str, Any]
+) -> (Sequence[Any], Dict[str, Any]):
+    invars = cast_tree(compute_dtype, invars)
+    bind_params = cast_tree(compute_dtype, bind_params)
     bind_params = dict(bind_params)
     if "preferred_element_type" in bind_params:
         bind_params["preferred_element_type"] = compute_dtype
@@ -56,6 +96,18 @@ low_precision_primitives = [
     lax.dot_general_p,
     lax.add_p,
     lax.sub_p,
+    lax.conv_general_dilated_p,
+    'eqx.nn.Linear',
+    'eqx.nn.Conv2d',
+    'eqx.nn.Conv',
+]
+
+high_precision_primitives = [
+    lax.mul_p,
+    lax.div_p,
+    'eqx.nn.BatchNorm',
+    'eqx.nn.LayerNorm',
+    'eqx.nn.SpectralNorm',
 ]
 
 # this dict specifies how different ops should be treated
@@ -63,13 +115,17 @@ low_precision_primitives = [
 # precision for additions, subtractions and
 # tensor contractions  (e.g. matrix multiplies, convs etc).
 # Otherwise we do not do anything.
-default_amp_policy = {op: use_low_precision for op in low_precision_primitives} | {
-    "amp_default": use_original_precision,
-    "amp_stop": use_original_precision,
-}
+default_amp_policy = (
+    {op: use_compute_precision for op in low_precision_primitives}
+    | {
+        "amp_default": use_original_precision,
+        "amp_stop": use_original_precision,
+    }
+    | {op: use_precision(jnp.float32) for op in high_precision_primitives}
+)
 
 
-def amp_stop(f=None):
+def amp_stop(f: Callable = None):
     context = jax.named_scope("amp_stop")
     if f is None:
         return context
@@ -77,7 +133,9 @@ def amp_stop(f=None):
         return context(f)
 
 
-def amp_eval_jaxpr(compute_dtype, amp_policy, closed_jaxpr: Jaxpr, *args, propagate_source_info=True):
+def amp_eval_jaxpr(
+    compute_dtype: Type, amp_policy: Dict[Any, Any], closed_jaxpr: Jaxpr, *args, propagate_source_info=True
+) -> Any:
     jaxpr = closed_jaxpr.jaxpr
 
     def read(v: Atom) -> Any:
@@ -96,49 +154,47 @@ def amp_eval_jaxpr(compute_dtype, amp_policy, closed_jaxpr: Jaxpr, *args, propag
         traceback = eqn.source_info.traceback if propagate_source_info else None
         with source_info_util.user_context(traceback, name_stack=name_stack):
             invars = map(read, eqn.invars)
-            scopes = str(name_stack).split("/")  # [elem.name for elem in name_stack]
+            scopes = str(name_stack).split("/")
             scopes.append(eqn.primitive)
             scopes.append("amp_default")
-            print("scopes: ",scopes)
-            print("policy keys: ",list(amp_policy.keys()))
             for scope in scopes:
                 if scope in amp_policy:
-                    invars, bind_params = amp_policy[scope](compute_dtype, *invars, **bind_params)
+                    invar_dtypes = map(lambda x: x.aval.dtype, eqn.invars)
+                    invars, bind_params = amp_policy[scope](compute_dtype, invar_dtypes, *invars, **bind_params)
                     break
             outvar_dtypes = map(lambda x: x.aval.dtype, eqn.outvars)
             ans = eqn.primitive.bind(*subfuns, *invars, **bind_params)
             if not eqn.primitive.multiple_results:
                 ans = [ans]
-            # We will trust in the compiler to eliminate noop casts to full precision
-            # followed by casts back down.
-            ans = map(lambda x, t: x.astype(t), ans, outvar_dtypes)
         map(write, eqn.outvars, ans)
         clean_up_dead_vars(eqn, env, lu)
     ans = map(read, jaxpr.outvars)
+    ans_dtypes = map(lambda x: x.aval.dtype, jaxpr.outvars)
+    ans = map(lambda x, t: x.astype(t), ans, ans_dtypes)
     return ans
 
 
-
-
 def amp(
-    sentinal=None, *, compute_dtype=ml_dtypes.bfloat16, amp_policy=default_amp_policy, static_argnums=(), filter=True
-):
-    print("amp policy provided: ",amp_policy)
+    sentinal: Optional[Callable] = None,
+    *,
+    compute_dtype: Type = ml_dtypes.bfloat16,
+    amp_policy: Dict = default_amp_policy,
+    static_argnums: Sequence[int] = (),
+    filter: bool = True,
+) -> Callable:
     if sentinal is not None:
-        return amp(
-                compute_dtype=compute_dtype,
-                amp_policy=amp_policy,
-                static_argnums=static_argnums,
-                filter=filter)(sentinal)
+        return amp(compute_dtype=compute_dtype, amp_policy=amp_policy, static_argnums=static_argnums, filter=filter)(
+            sentinal
+        )
     assert len(static_argnums) == 0 and filter, "currently only support filtering to find static arguments"
 
-    def decorator(fn: Callable):
+    def decorator(fn: Callable) -> Any:
         @wraps(fn)
         def wrapped_fn(*args, **kwargs):
             flat_args, flat_args_treedef = jtu.tree_flatten((args, kwargs))
 
-            array_idx = [i for i, x in enumerate(flat_args) if eqx.is_array(x)]
-            static_idx = [i for i, x in enumerate(flat_args) if not eqx.is_array(x)]
+            array_idx = [i for i, x in enumerate(flat_args) if eqx.is_array(x) or eqx.is_inexact_array_like(x)]
+            static_idx = [i for i, x in enumerate(flat_args) if not (eqx.is_array(x) or eqx.is_inexact_array_like(x))]
 
             array_args = [flat_args[i] for i in array_idx]
             static_args = [flat_args[i] for i in static_idx]
@@ -152,9 +208,19 @@ def amp(
             closed_jaxpr, output_shape = jaxpr_generator(*flat_args)
             _, output_treedef = jtu.tree_flatten(output_shape)
             flat_out = amp_eval_jaxpr(compute_dtype, amp_policy, closed_jaxpr, *array_args)
-            return jtu.tree_unflatten(output_treedef, flat_out)
+            ans = jtu.tree_unflatten(output_treedef, flat_out)
+
+            # For some reason, not including the following commented-out line
+            # (which should be a no-op since the output is never accessed) causes jit to
+            # recompile a few more times than it should really need to. Outside of a jit
+            # context though, this line is very expensive. So, we'll leave it out
+            # and just eat the small number of extra compiles.
+            # It would be great to understand why those compiles are happening though...
+
+            # nonjaxpr_ans = flat_fn(*flat_args)
+
+            return ans
 
         return wrapped_fn
 
     return decorator
-

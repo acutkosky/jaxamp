@@ -33,7 +33,7 @@ zip, unsafe_zip = safe_zip, zip
 map, unsafe_map = safe_map, map
 
 
-def default_precision(compute_dtype, *invars, **bind_params):
+def use_original_precision(compute_dtype, *invars, **bind_params):
     return invars, bind_params
 
 
@@ -44,8 +44,7 @@ def cast_if_float(dtype, value):
     return value
 
 
-def low_precision(compute_dtype, *invars, **bind_params):
-    # print("running low precision")
+def use_low_precision(compute_dtype, *invars, **bind_params):
     invars = map(cast_if_float(compute_dtype), invars)
     bind_params = dict(bind_params)
     if "preferred_element_type" in bind_params:
@@ -64,16 +63,13 @@ low_precision_primitives = [
 # precision for additions, subtractions and
 # tensor contractions  (e.g. matrix multiplies, convs etc).
 # Otherwise we do not do anything.
-default_amp_policy = defaultdict(
-    lambda: default_precision, # default value
-    {
-        op: low_precision for op in low_precision_primitives
-    },
-)
+default_amp_policy = {op: use_low_precision for op in low_precision_primitives} | {
+    "amp_default": use_original_precision,
+    "amp_stop": use_original_precision,
+}
 
 
-
-def amp_stop(f = None):
+def amp_stop(f=None):
     context = jax.named_scope("amp_stop")
     if f is None:
         return context
@@ -88,15 +84,11 @@ def amp_eval_jaxpr(compute_dtype, amp_policy, closed_jaxpr: Jaxpr, *args, propag
         return v.val if isinstance(v, Literal) else env[v]
 
     def write(v: Var, val: Any) -> None:
-        # nonlocal env
         env[v] = val
 
     env: dict[Var, Any] = {}
     map(write, jaxpr.constvars, closed_jaxpr.consts)
     map(write, jaxpr.invars, args)
-    # print(jaxpr.invars)
-    # print("args: ", args)
-    # print("env initial: ", env)
     lu = last_used(jaxpr)
     for eqn in jaxpr.eqns:
         subfuns, bind_params = eqn.primitive.get_bind_params(eqn.params)
@@ -104,20 +96,21 @@ def amp_eval_jaxpr(compute_dtype, amp_policy, closed_jaxpr: Jaxpr, *args, propag
         traceback = eqn.source_info.traceback if propagate_source_info else None
         with source_info_util.user_context(traceback, name_stack=name_stack):
             invars = map(read, eqn.invars)
-            # print(f"name stack: ",name_stack)
-            names_in_stack = str(name_stack).split("/")#[elem.name for elem in name_stack]
-            # print(f"eqn: {eqn}")
-            if "amp_stop" not in names_in_stack:
-                invars, bind_params = amp_policy[eqn.primitive](compute_dtype, *invars, **bind_params)
-            # print(f"invars: {invars}")
-            # print(f"subfuns: ",subfuns)
-            # print(f"binparams: {bind_params}")
-            # bind_params['preferred_element_type'] = compute_dtype
+            scopes = str(name_stack).split("/")  # [elem.name for elem in name_stack]
+            scopes.append(eqn.primitive)
+            scopes.append("amp_default")
+            print("scopes: ",scopes)
+            print("policy keys: ",list(amp_policy.keys()))
+            for scope in scopes:
+                if scope in amp_policy:
+                    invars, bind_params = amp_policy[scope](compute_dtype, *invars, **bind_params)
+                    break
             outvar_dtypes = map(lambda x: x.aval.dtype, eqn.outvars)
             ans = eqn.primitive.bind(*subfuns, *invars, **bind_params)
             if not eqn.primitive.multiple_results:
                 ans = [ans]
-            # print("outvar types: ",outvar_dtypes)
+            # We will trust in the compiler to eliminate noop casts to full precision
+            # followed by casts back down.
             ans = map(lambda x, t: x.astype(t), ans, outvar_dtypes)
         map(write, eqn.outvars, ans)
         clean_up_dead_vars(eqn, env, lu)
@@ -126,81 +119,42 @@ def amp_eval_jaxpr(compute_dtype, amp_policy, closed_jaxpr: Jaxpr, *args, propag
 
 
 
-def amp(sentinal=None, *, compute_dtype=ml_dtypes.bfloat16, amp_policy=default_amp_policy, static_argnums=()):
+
+def amp(
+    sentinal=None, *, compute_dtype=ml_dtypes.bfloat16, amp_policy=default_amp_policy, static_argnums=(), filter=True
+):
+    print("amp policy provided: ",amp_policy)
     if sentinal is not None:
-        return amp()(sentinal)
+        return amp(
+                compute_dtype=compute_dtype,
+                amp_policy=amp_policy,
+                static_argnums=static_argnums,
+                filter=filter)(sentinal)
+    assert len(static_argnums) == 0 and filter, "currently only support filtering to find static arguments"
 
     def decorator(fn: Callable):
-
-        jaxpr_generator = jax.make_jaxpr(fn, static_argnums=static_argnums, return_shape=True)
-
         @wraps(fn)
         def wrapped_fn(*args, **kwargs):
             flat_args, flat_args_treedef = jtu.tree_flatten((args, kwargs))
-            closed_jaxpr, output_shape = jaxpr_generator(*args, **kwargs)
+
+            array_idx = [i for i, x in enumerate(flat_args) if eqx.is_array(x)]
+            static_idx = [i for i, x in enumerate(flat_args) if not eqx.is_array(x)]
+
+            array_args = [flat_args[i] for i in array_idx]
+            static_args = [flat_args[i] for i in static_idx]
+
+            def flat_fn(*flat_args):
+                args, kwargs = jtu.tree_unflatten(flat_args_treedef, flat_args)
+                return fn(*args, **kwargs)
+
+            jaxpr_generator = jax.make_jaxpr(flat_fn, static_argnums=static_idx, return_shape=True)
+
+            closed_jaxpr, output_shape = jaxpr_generator(*flat_args)
             _, output_treedef = jtu.tree_flatten(output_shape)
-            flat_out = amp_eval_jaxpr(compute_dtype, amp_policy, closed_jaxpr, *flat_args)
+            flat_out = amp_eval_jaxpr(compute_dtype, amp_policy, closed_jaxpr, *array_args)
             return jtu.tree_unflatten(output_treedef, flat_out)
 
         return wrapped_fn
 
     return decorator
 
-
-# def blah(z, y, x):
-#     return x, z, y
-
-
-# d = {'y': 1, 'x': 2}
-# print(list(d.keys()))
-# jaxpr = jax.make_jaxpr(blah)({'p': 3}, **d)
-# print(jaxpr)
-
-
-# @jax.named_scope("sq")
-# def sq(x):
-#     return x**2
-
-
-# @jax.named_scope("itsame")
-# def func(x):
-#     print("x:   !", x.shape)
-#     return 1.0 / sq(x)
-
-
-# from jax.experimental.maps import xmap
-
-# xmfunc = xmap(amp(func), in_axes={0: 'batch'}, out_axes={0: 'batch'})
-
-# p = xmfunc(2 * jnp.ones((3, 4)))
-
-# print("xmfunc: ", p)
-
-
-# ampfunc = jax.jit(amp(func))
-# k = jax.random.PRNGKey(0)
-# l = eqx.nn.Linear(5, 5, key=k)
-
-# x = jnp.ones(5)
-
-# closed_jaxpr = jax.make_jaxpr(l)(x)
-# a = jax.jit(amp(l))(x)
-# # a = amp_eval_jaxpr(closed_jaxpr, x)
-# print("linear a: ", a)
-# a = l(x)
-# print("linear no amp a: ", a)
-
-# x = jnp.array(1e-5)
-# closed_jaxpr = jax.make_jaxpr(func)(x)
-# # jnp.ones(5, dtype=jnp.float16))
-# print(closed_jaxpr)
-# print(closed_jaxpr.jaxpr)
-# # a = eval_jaxpr(closed_jaxpr.jaxpr, closed_jaxpr.consts, x)#jnp.ones(5, dtype=jnp.float16))
-# # a = amp_eval_jaxpr(closed_jaxpr, x)
-# # jnp.ones(5, dtype=jnp.float16))
-# # print(a)
-# # print("lax mul_p: ", lax.mul_p)
-
-
-# a = ampfunc(x)
-# print("final a: ", a)

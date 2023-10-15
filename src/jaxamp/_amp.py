@@ -180,16 +180,13 @@ def amp_eval_jaxpr(
 def amp(
     sentinal: Optional[Callable] = None,
     *,
-    compute_dtype: Type = ml_dtypes.bfloat16,
+    compute_dtype: Type = jnp.float16,
     amp_policy: Dict = default_amp_policy,
-    static_argnums: Sequence[int] = (),
-    filter: bool = True,
 ) -> Callable:
     if sentinal is not None:
-        return amp(compute_dtype=compute_dtype, amp_policy=amp_policy, static_argnums=static_argnums, filter=filter)(
+        return amp(compute_dtype=compute_dtype, amp_policy=amp_policy)(
             sentinal
         )
-    assert len(static_argnums) == 0 and filter, "currently only support filtering to find static arguments"
 
     def decorator(fn: Callable) -> Any:
         @wraps(fn)

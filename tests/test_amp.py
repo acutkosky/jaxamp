@@ -2,9 +2,9 @@ import pytest
 import equinox as eqx
 from equinox import nn
 from jaxtyping import PRNGKeyArray
-from eqxamp import (
+from jaxamp import (
     amp,
-    DynamicScalarState,
+    DynamicScalerState,
     dynamic_scale_grad,
     dynamic_scale_value_and_grad,
     amp_stop,
@@ -14,7 +14,6 @@ from eqxamp import (
 import jax
 from jax import numpy as jnp
 from jax.random import PRNGKey
-from ml_dtypes import bfloat16
 
 
 class HalfLinear(eqx.Module):
@@ -24,8 +23,8 @@ class HalfLinear(eqx.Module):
         self.l1 = nn.Linear(in_features, out_features, use_bias=True, key=key)
 
     def __call__(self, x, *, key=None):
-        l1 = eqx.tree_at(lambda tree: (tree.weight, tree.bias), self.l1, replace_fn=lambda x: x.astype(bfloat16))
-        x = x.astype(bfloat16)
+        l1 = eqx.tree_at(lambda tree: (tree.weight, tree.bias), self.l1, replace_fn=lambda x: x.astype(jnp.float16))
+        x = x.astype(jnp.float16)
         y = l1(x)
         return y.astype(jnp.float32)
 
@@ -51,10 +50,10 @@ class HalfWeightLinear(eqx.Module):
         # print("l1: ", self.l1)
 
     def __call__(self, x, *, key=None):
-        l1 = eqx.tree_at(lambda tree: (tree.weight), self.l1, replace_fn=lambda x: x.astype(bfloat16))
+        l1 = eqx.tree_at(lambda tree: (tree.weight), self.l1, replace_fn=lambda x: x.astype(jnp.float16))
         # print("self.l1 weight: ", self.l1.weight)
         # print("l1 weight: ", l1.weight)
-        x = x.astype(bfloat16)
+        x = x.astype(jnp.float16)
         y = l1(x)
         return y.astype(jnp.float32)
 
@@ -118,7 +117,7 @@ def test_static():
 @pytest.mark.parametrize("tx", ["grad", "value_and_grad"])
 @pytest.mark.parametrize("f", [True, False])
 @pytest.mark.parametrize("aux", [True, False])
-def test_dynamic_scalar(tx, f, aux):
+def test_dynamic_scaler(tx, f, aux):
     if tx == "grad":
         transform = dynamic_scale_grad
     elif tx == "value_and_grad":
@@ -131,9 +130,9 @@ def test_dynamic_scalar(tx, f, aux):
 
     x = jnp.array(2.0, dtype=jnp.float16)
 
-    scalar_state = DynamicScalarState(scalar=2**15, patience=10)
+    scaler_state = DynamicScalerState(scaler=2**15, patience=10)
     grad_fn = jax.jit(transform(func, filter=f, has_aux=aux, redo_on_nan=100))
-    scalar_state, g = grad_fn(x, dynamic_scalar_state=scalar_state)
+    scaler_state, g = grad_fn(x, dynamic_scaler_state=scaler_state)
     if tx == "value_and_grad" and aux:
         (v, a), g = g
     if tx == "value_and_grad" and not aux:
@@ -145,13 +144,13 @@ def test_dynamic_scalar(tx, f, aux):
     if tx == "value_and_grad":
         assert jnp.allclose(v, 8.0)
     assert jnp.allclose(g, 12.0)
-    assert jnp.allclose(scalar_state.scalar, 2**12)
-    assert jnp.allclose(scalar_state.count, 1.0)
+    assert jnp.allclose(scaler_state.scaler, 2**12)
+    assert jnp.allclose(scaler_state.count, 1.0)
 
     for i in range(9):
-        scalar_state, g = grad_fn(x, dynamic_scalar_state=scalar_state)
-        assert jnp.allclose(scalar_state.scalar, 2**12)
-        assert jnp.allclose(scalar_state.count, i + 2.0)
+        scaler_state, g = grad_fn(x, dynamic_scaler_state=scaler_state)
+        assert jnp.allclose(scaler_state.scaler, 2**12)
+        assert jnp.allclose(scaler_state.count, i + 2.0)
         if tx == "value_and_grad" and aux:
             (v, a), g = g
         if tx == "value_and_grad" and not aux:
@@ -166,31 +165,31 @@ def test_dynamic_scalar(tx, f, aux):
 
         assert jnp.allclose(g, 12.0)
 
-    scalar_state, g = grad_fn(x, dynamic_scalar_state=scalar_state)
-    assert jnp.allclose(scalar_state.scalar, 2**13)
-    assert jnp.allclose(scalar_state.count, 0.0)
+    scaler_state, g = grad_fn(x, dynamic_scaler_state=scaler_state)
+    assert jnp.allclose(scaler_state.scaler, 2**13)
+    assert jnp.allclose(scaler_state.count, 0.0)
 
-    scalar_state, g = grad_fn(x, dynamic_scalar_state=scalar_state)
-    assert jnp.allclose(scalar_state.scalar, 2**12)
-    assert jnp.allclose(scalar_state.count, 1.0)
+    scaler_state, g = grad_fn(x, dynamic_scaler_state=scaler_state)
+    assert jnp.allclose(scaler_state.scaler, 2**12)
+    assert jnp.allclose(scaler_state.count, 1.0)
 
-    scalar_state = DynamicScalarState(scalar=2**15)
+    scaler_state = DynamicScalerState(scaler=2**15)
     grad_fn = jax.jit(transform(func, filter=f, has_aux=aux, redo_on_nan=0))
-    scalar_state, g = grad_fn(x, dynamic_scalar_state=scalar_state)
-    assert jnp.allclose(scalar_state.scalar, 2**14)
-    assert jnp.allclose(scalar_state.count, 0.0)
+    scaler_state, g = grad_fn(x, dynamic_scaler_state=scaler_state)
+    assert jnp.allclose(scaler_state.scaler, 2**14)
+    assert jnp.allclose(scaler_state.count, 0.0)
 
-    scalar_state, g = grad_fn(x, dynamic_scalar_state=scalar_state)
-    assert jnp.allclose(scalar_state.scalar, 2**13)
-    assert jnp.allclose(scalar_state.count, 0.0)
+    scaler_state, g = grad_fn(x, dynamic_scaler_state=scaler_state)
+    assert jnp.allclose(scaler_state.scaler, 2**13)
+    assert jnp.allclose(scaler_state.count, 0.0)
 
-    scalar_state, g = grad_fn(x, dynamic_scalar_state=scalar_state)
-    assert jnp.allclose(scalar_state.scalar, 2**12)
-    assert jnp.allclose(scalar_state.count, 0.0)
+    scaler_state, g = grad_fn(x, dynamic_scaler_state=scaler_state)
+    assert jnp.allclose(scaler_state.scaler, 2**12)
+    assert jnp.allclose(scaler_state.count, 0.0)
 
-    scalar_state, g = grad_fn(x, dynamic_scalar_state=scalar_state)
-    assert jnp.allclose(scalar_state.scalar, 2**12)
-    assert jnp.allclose(scalar_state.count, 1.0)
+    scaler_state, g = grad_fn(x, dynamic_scaler_state=scaler_state)
+    assert jnp.allclose(scaler_state.scaler, 2**12)
+    assert jnp.allclose(scaler_state.count, 1.0)
 
     if tx == "value_and_grad" and aux:
         (v, a), g = g

@@ -23,46 +23,46 @@ def all_finite(tree: PyTree) -> jax.Array:
     return jnp.stack(list(finite)).all()
 
 
-class DynamicScalarState(NamedTuple):
+class DynamicScalerState(NamedTuple):
     patience: jax.Array = jnp.array(2000)
     adjust_factor: jax.Array = jnp.array(2.0)
     scalar: jax.Array = jnp.array(2**15, dtype=jnp.float32)
     count: jax.Array = jnp.array(0)
 
 
-def increment_state(state: DynamicScalarState) -> DynamicScalarState:
+def increment_state(state: DynamicScalerState) -> DynamicScalerState:
     new_state = jax.lax.cond(
         state.count >= state.patience,
-        lambda state: DynamicScalarState(state.patience, state.adjust_factor, state.scalar * state.adjust_factor, 0.0),
-        lambda state: DynamicScalarState(state.patience, state.adjust_factor, state.scalar, state.count + 1.0),
+        lambda state: DynamicScalerState(state.patience, state.adjust_factor, state.scalar * state.adjust_factor, 0.0),
+        lambda state: DynamicScalerState(state.patience, state.adjust_factor, state.scalar, state.count + 1.0),
         state,
     )
 
     return new_state
 
 
-def decrease_scalar(state: DynamicScalarState) -> DynamicScalarState:
-    return DynamicScalarState(state.patience, state.adjust_factor, state.scalar / state.adjust_factor, 0.0)
+def decrease_scalar(state: DynamicScalerState) -> DynamicScalerState:
+    return DynamicScalerState(state.patience, state.adjust_factor, state.scalar / state.adjust_factor, 0.0)
 
 
-def default_unscale_fn(results: Any, state: DynamicScalarState) -> Any:
+def default_unscale_fn(results: Any, state: DynamicScalerState) -> Any:
     return jtu.tree_map(lambda x: x.astype(state.scalar.dtype) / state.scalar, results)
 
 
-def value_and_grad_aux_unscale_fn(results: Any, state: DynamicScalarState) -> Any:
+def value_and_grad_aux_unscale_fn(results: Any, state: DynamicScalerState) -> Any:
     (value, aux), grad = results
     value = default_unscale_fn(value, state)
     grad = default_unscale_fn(grad, state)
     return (value, aux), grad
 
 
-def grad_aux_unscale_fn(results: Any, state: DynamicScalarState) -> Any:
+def grad_aux_unscale_fn(results: Any, state: DynamicScalerState) -> Any:
     grad, aux = results
     grad = default_unscale_fn(grad, state)
     return grad, aux
 
 
-def default_scale_fn(result: Any, state: DynamicScalarState) -> Any:
+def default_scale_fn(result: Any, state: DynamicScalerState) -> Any:
     if not eqx.is_array_like(result):
         value, aux = result
         value = state.scalar.astype(value.dtype) * value
@@ -80,18 +80,18 @@ def dynamic_scale_tx(
 ):
     def scaled_transform(fun, *args, **kwargs):
         @wraps(fun)
-        def scaled_fun(*f_args, _dynamic_scalar_state: DynamicScalarState, **f_kwargs):
+        def scaled_fun(*f_args, _dynamic_scaler_state: DynamicScalerState, **f_kwargs):
             result = fun(*f_args, **f_kwargs)
-            return scale_fn(result, _dynamic_scalar_state)
+            return scale_fn(result, _dynamic_scaler_state)
 
         transformed_fn = transform(scaled_fun, *args, **kwargs)
 
-        def maybe_adjust_scalar(*f_args, dynamic_scalar_state: DynamicScalarState, **f_kwargs):
+        def maybe_adjust_scalar(*f_args, dynamic_scaler_state: DynamicScalerState, **f_kwargs):
             # avoid type mismatch complaints later in case state is initialized
             # with raw python ints/floats
-            state = jtu.tree_map(lambda x: jnp.array(x).astype(jnp.float32), dynamic_scalar_state)
+            state = jtu.tree_map(lambda x: jnp.array(x).astype(jnp.float32), dynamic_scaler_state)
 
-            results = transformed_fn(*f_args, _dynamic_scalar_state=state, **f_kwargs)
+            results = transformed_fn(*f_args, _dynamic_scaler_state=state, **f_kwargs)
 
             results = unscale_fn(results, state)
 
@@ -102,10 +102,10 @@ def dynamic_scale_tx(
         if redo_on_nan == 0:
             return maybe_adjust_scalar
 
-        def adjust_scalar_until_finite(*f_args, dynamic_scalar_state: DynamicScalarState, **f_kwargs):
+        def adjust_scalar_until_finite(*f_args, dynamic_scaler_state: DynamicScalerState, **f_kwargs):
             redo_count = jnp.array(0, jnp.int32)
 
-            new_state, results = maybe_adjust_scalar(*f_args, dynamic_scalar_state=dynamic_scalar_state, **f_kwargs)
+            new_state, results = maybe_adjust_scalar(*f_args, dynamic_scaler_state=dynamic_scaler_state, **f_kwargs)
 
             init_val = (new_state, results, redo_count)
 
@@ -115,7 +115,7 @@ def dynamic_scale_tx(
 
             def body_fun(state__results__redo_count):
                 state, results, redo_count = state__results__redo_count
-                state, results = maybe_adjust_scalar(*f_args, dynamic_scalar_state=state, **f_kwargs)
+                state, results = maybe_adjust_scalar(*f_args, dynamic_scaler_state=state, **f_kwargs)
                 return (state, results, redo_count + 1)
 
             new_state, results, redo_count = jax.lax.while_loop(

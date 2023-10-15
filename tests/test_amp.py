@@ -23,7 +23,11 @@ class HalfLinear(eqx.Module):
         self.l1 = nn.Linear(in_features, out_features, use_bias=True, key=key)
 
     def __call__(self, x, *, key=None):
-        l1 = eqx.tree_at(lambda tree: (tree.weight, tree.bias), self.l1, replace_fn=lambda x: x.astype(jnp.float16))
+        l1 = eqx.tree_at(
+            lambda tree: (tree.weight, tree.bias),
+            self.l1,
+            replace_fn=lambda x: x.astype(jnp.float16),
+        )
         x = x.astype(jnp.float16)
         y = l1(x)
         return y.astype(jnp.float32)
@@ -50,7 +54,11 @@ class HalfWeightLinear(eqx.Module):
         # print("l1: ", self.l1)
 
     def __call__(self, x, *, key=None):
-        l1 = eqx.tree_at(lambda tree: (tree.weight), self.l1, replace_fn=lambda x: x.astype(jnp.float16))
+        l1 = eqx.tree_at(
+            lambda tree: (tree.weight),
+            self.l1,
+            replace_fn=lambda x: x.astype(jnp.float16),
+        )
         # print("self.l1 weight: ", self.l1.weight)
         # print("l1 weight: ", l1.weight)
         x = x.astype(jnp.float16)
@@ -69,7 +77,9 @@ def test_linear_amp():
     amp_half = amp(half)
     amp_stopped = amp(amp_stop(full))
     amp_bias_stopped = amp(bias_stopped)
-    amp_no_linear = amp(full, amp_policy=default_amp_policy | {'eqx.nn.Linear': use_original_precision})
+    amp_no_linear = amp(
+        full, amp_policy=default_amp_policy | {"eqx.nn.Linear": use_original_precision}
+    )
 
     x = jnp.array([5.0, 2.0])
 
@@ -94,14 +104,21 @@ def test_linear_amp():
 
 def test_static():
     key = PRNGKey(0)
-    bn, state = eqx.nn.make_with_state(eqx.nn.BatchNorm)(2, axis_name="batch")  # , key=key)
+    bn, state = eqx.nn.make_with_state(eqx.nn.BatchNorm)(
+        2, axis_name="batch"
+    )  # , key=key)
 
     def get_batch_value(bn, state, data):
         ans, state = bn(data, state)
         return ans, state
 
     def get_value(bn, state, data):
-        vmap_value = jax.vmap(get_batch_value, axis_name="batch", in_axes=(None, None, 0), out_axes=(0, None))
+        vmap_value = jax.vmap(
+            get_batch_value,
+            axis_name="batch",
+            in_axes=(None, None, 0),
+            out_axes=(0, None),
+        )
         return vmap_value(bn, state, data)
 
     amp_get_value = amp(get_value)

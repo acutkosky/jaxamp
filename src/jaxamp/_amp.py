@@ -85,6 +85,7 @@ def use_compute_precision(
     compute_dtype: Type, original_dtypes: Sequence[Type], *invars: Sequence[Any], **bind_params: Dict[str, Any]
 ) -> (Sequence[Any], Dict[str, Any]):
     for invar in invars:
+        # if anything is an integer, let's not cast anything.
         if not eqx.is_inexact_array(invar):
             return invars, bind_params
     invars = cast_tree(compute_dtype, invars)

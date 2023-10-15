@@ -46,12 +46,20 @@ def train_loop(model_state, opt_state, optimizer, dataloader):
 Now, you can replace this with:
 ```python
 
-def train_step(model_state, opt_state, minibatch, dynamic_scaler_state, optimizer):
+def train_step(
+    model_state,
+    opt_state,
+    minibatch,
+    dynamic_scaler_state,
+    optimizer):
   amp_loss_fn = jaxamp.amp(loss_fn)
   
   value_and_grad_fn = jax.value_and_grad(amp_loss_fn, has_aux=True)
 
-  dynamic_scaler_state, ((loss, accuracy), grads) = jaxamp.dynamic_scale_value_and_grad_fn(model_state, minibatch, dynamic_scaler_state=dynamic_scaler_state)
+  dynamic_scaler_state, ((loss, accuracy), grads) = jaxamp.dynamic_scale_value_and_grad_fn(
+    model_state,
+    minibatch,
+    dynamic_scaler_state=dynamic_scaler_state)
 
   updates, opt_state = optimizer.update(grads, opt_state, model_state)
   model_state = optax.apply_updates(model_state, updates)
@@ -61,7 +69,11 @@ def train_loop(model_state, opt_state, optimizer, dataloader):
   train_step_jit = jax.jit(train_step, static_argnums=3)
   dynamic_scaler_state = amp.DynamicScalerState()
   for minibatch in dataloader:
-    model_state, opt_state, dynamic_scaler_state, loss, accuracy = train_step_jit(model_state, opt_state, minibatch, optimizer)
+    model_state, opt_state, dynamic_scaler_state, loss, accuracy = train_step_jit(
+      model_state,
+      opt_state,
+      minibatch,
+      optimizer)
     log_metrics(loss, accuracy)
   return model_state, opt_state
 ```
@@ -74,12 +86,18 @@ The `amp` function transforms an arbitrary function into one in which some opera
 `amp_loss_fn = amp(loss_fn, compute_dtype=jnp.float16)`. You can also control which operations are performed in low precision (and how) via the `amp_policy` keyword-only argument. This argument should
 take a dictionary whose keys must be either strings or jax primitives (e.g. `jax.lax.add_p`). The values are functions that will be called to cast arrays into relevant dtypes. These functions should have signature:
 ```python
-def precision_fn(compute_dtype: Type, original_dtypes: Sequence[Type], *invars: Sequence[Array], **bing_params: Dict[str, Any]) -> Sequence[Array], Dict[str, Any]:
+def precision_fn(
+    compute_dtype: Type,
+    original_dtypes: Sequence[Type],
+    *invars: Sequence[Array],
+    *bind_params: Dict[str, Any]) -> Sequence[Array], Dict[str, Any]:
   '''
   Args:
     compute_dtype: this is the compute_dtype provided to `amp`.
-    original_dtypes: these are  the dtypes that original use-code expected the arguments to the op we are about to transform were going  to be.
-    invars: the input arrays to this operation (note that these dtypes may not match original_dtypes because of previous casting we might have performed).
+    original_dtypes: these are the dtypes that original user code expected the arguments
+        to the op we are about to transform were going  to be.
+    invars: the input arrays to this operation (note that these dtypes may not match
+        original_dtypes because of previous casting we might have performed).
     bind_params: the "meta" parameters to the op (things like axis specifications).
   returns
     new_invars, new_bind_params: the transformed values for invars and bind_params.
@@ -88,7 +106,10 @@ def precision_fn(compute_dtype: Type, original_dtypes: Sequence[Type], *invars: 
 For example, the function used to cast to `compute_dtype` is:
 ```python
 def use_compute_precision(
-    compute_dtype: Type, original_dtypes: Sequence[Type], *invars: Sequence[Any], **bind_params: Dict[str, Any]
+    compute_dtype: Type,
+    original_dtypes: Sequence[Type],
+    *invars: Sequence[Any],
+    **bind_params: Dict[str, Any]
 ) -> (Sequence[Any], Dict[str, Any]):
     for invar in invars:
         # if anything is an integer, let's not cast anything.

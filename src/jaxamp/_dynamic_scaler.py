@@ -165,7 +165,7 @@ def dynamic_scale_grad(
     **kwargs
 ):
     '''
-    apply dynamic scalar to the grad function.
+    apply dynamic scaler to the grad function.
 
     Args:
         fun: function to differentiate
@@ -206,7 +206,7 @@ def dynamic_scale_value_and_grad(
     **kwargs
 ):
     '''
-    apply dynamic scalar to the value_and_grad function.
+    apply dynamic scaler to the value_and_grad function.
 
     Args:
         fun: function to differentiate

@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-from ._dynamic_scalar import (
+from ._dynamic_scaler import (
     DynamicScalerState,
     dynamic_scale_tx,
     dynamic_scale_value_and_grad,

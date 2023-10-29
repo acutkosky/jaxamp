@@ -5,8 +5,8 @@
 **Table of Contents**
 
 - [Installation](#installation)
-- [License](#license)
 - [Usage](#usage)
+- [License](#license)
 
 ## Installation
 
@@ -177,4 +177,4 @@ When using `optax`, you may want to wrap your optimizers in `optax.apply_if_fini
 
 ## License
 
-`jaxamp` is distributed under the terms of the [MIT](https://spdx.org/licenses/MIT.html) license.
+`jaxamp` is distributed under the terms of the [Apache 2.0](https://spdx.org/licenses/Apache-2.0.html) license.

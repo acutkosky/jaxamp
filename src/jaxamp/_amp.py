@@ -174,7 +174,11 @@ def amp_eval_jaxpr(
         clean_up_dead_vars(eqn, env, lu)
     ans = map(read, jaxpr.outvars)
     ans_dtypes = map(lambda x: x.aval.dtype, jaxpr.outvars)
-    ans = map(lambda x, t: x.astype(t), ans, ans_dtypes)
+    def map_type(x, t):
+        if eqx.is_array(x):
+            return x.astype(t)
+        return x
+    ans = map(map_type, ans, ans_dtypes)
     return ans
 
 
@@ -194,8 +198,8 @@ def amp(
         def wrapped_fn(*args, **kwargs):
             flat_args, flat_args_treedef = jtu.tree_flatten((args, kwargs))
 
-            array_idx = [i for i, x in enumerate(flat_args) if eqx.is_array(x) or eqx.is_inexact_array_like(x)]
-            static_idx = [i for i, x in enumerate(flat_args) if not (eqx.is_array(x) or eqx.is_inexact_array_like(x))]
+            array_idx = [i for i, x in enumerate(flat_args) if eqx.is_array(x)]
+            static_idx = [i for i, x in enumerate(flat_args) if not eqx.is_array(x)]
 
             array_args = [flat_args[i] for i in array_idx]
             static_args = [flat_args[i] for i in static_idx]

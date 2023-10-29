@@ -16,6 +16,22 @@ pip install jaxamp
 
 ## Usage
 
+TL;DR: Like [pytorch amp](https://pytorch.org/docs/stable/amp.html), but for JAX.
+
+Replace `loss_fn(model, minibatch)` with `jaxamp.amp(loss_fn)(model,minibatch)` to run with with [mixed precision](https://docs.nvidia.com/deeplearning/performance/mixed-precision-training/index.html). Use `scaler_state = jaxamp.DynamicScalerState()` and `jaxamp.dynamic_scale_grad` or `jaxamp.dynamic_scale_value_and_grad` to apply a dynamic loss scaler:
+```python
+def loss(model, minibatch):
+  ...
+
+scaler_state= jaxamp.DynamicLossScaler()
+amp_loss = jaxamp.amp(loss)
+grad_fn = jaxamp.dynamic_scale_grad(amp_loss)
+scaler_state, grad = grad_fn(model, minibatch, dynamic_scaler_state=scaler_state)
+```
+
+
+
+### More details
 Your usual training loop might look like this:
 ```python
 
@@ -54,9 +70,9 @@ def train_step(
     optimizer):
   amp_loss_fn = jaxamp.amp(loss_fn)
   
-  value_and_grad_fn = jax.value_and_grad(amp_loss_fn, has_aux=True)
+  value_and_grad_fn = jaxamp.dynamic_scale_value_and_grad(amp_loss_fn, has_aux=True)
 
-  dynamic_scaler_state, ((loss, accuracy), grads) = jaxamp.dynamic_scale_value_and_grad_fn(
+  dynamic_scaler_state, ((loss, accuracy), grads) = value_and_grad_fn(
     model_state,
     minibatch,
     dynamic_scaler_state=dynamic_scaler_state)
@@ -148,7 +164,7 @@ def dynamic_scale_value_and_grad(
     fun: Callable,
     *,
     has_aux: bool = False,
-    redo_on_nan: bool = 10,
+    redo_on_nan: bool = 0,
     filter=True,
     **kwargs
 ):

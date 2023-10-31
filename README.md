@@ -141,7 +141,7 @@ def use_compute_precision(
 
 `amp` will walk through all the ops in your function and look up each op in your `amp_policy` dict. If the op is present, it will apply the specified function
 Otherwise it  will cast the inputs to their original values and apply the op unchanged. You can also provide string keys in `amp_policy`. In this case, if the current operation
-is executed inside a scope declared with `jax.named_scope`, we will apply the  specified transformation function. The *outermost* scope is used. There are two special scopes `"amp_step"` and `"amp_default"`.
+is executed inside a scope declared with `jax.named_scope`, we will apply the  specified transformation function. If two or more active scopes match policies in `amp_policy` the *outermost* scope is used. There are two special scopes `"amp_step"` and `"amp_default"`.
 By default these both stop any automatic mixed precision from happening inside them.
 
 

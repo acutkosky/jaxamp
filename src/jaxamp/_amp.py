@@ -5,7 +5,6 @@ from functools import wraps
 from jax import lax
 from jax._src.util import (
     safe_map,
-    curry,
 )
 from jax._src.core import (
     Jaxpr,
@@ -14,27 +13,16 @@ from jax._src.core import (
     Var,
     last_used,
     clean_up_dead_vars,
-    eval_jaxpr,
 )
 from jax._src import source_info_util
 from typing import (
     Any,
     Callable,
-    ClassVar,
-    DefaultDict,
-    Generic,
-    NamedTuple,
-    TypeVar,
-    Union,
     Sequence,
     Type,
     Dict,
     Optional,
-    cast,
-    overload,
 )
-from types import MappingProxyType
-from collections import defaultdict
 import ml_dtypes
 import equinox as eqx
 from jaxtyping import PyTree
@@ -189,8 +177,6 @@ def amp_eval_jaxpr(
             invars = map(read, eqn.invars)
             raw_name_stack.append(eqn.primitive)
             raw_name_stack.append("amp_default")
-            # print("about to bind: ",eqn.primitive)
-            # print("looking up scope: ",raw_name_stack)
             for scope in raw_name_stack:
                 if scope in amp_policy:
                     invar_dtypes = map(lambda x: x.aval.dtype, eqn.invars)
@@ -198,7 +184,6 @@ def amp_eval_jaxpr(
                         compute_dtype, invar_dtypes, *invars, **bind_params
                     )
                     break
-            outvar_dtypes = map(lambda x: x.aval.dtype, eqn.outvars)
             ans = eqn.primitive.bind(*subfuns, *invars, **bind_params)
             if not eqn.primitive.multiple_results:
                 ans = [ans]

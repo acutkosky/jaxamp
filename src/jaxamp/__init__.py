@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2023-present Ashok Cutkosky <ashok@cutkosky.com>
 #
 # SPDX-License-Identifier: Apache-2.0
+from .__about__ import __version__
 
 from ._dynamic_scaler import (
     DynamicScalerState,

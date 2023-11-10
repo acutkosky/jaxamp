@@ -102,6 +102,18 @@ def test_linear_amp():
     assert jnp.allclose(full_out, amp_no_linear_out)
 
 
+def test_high_dtype_grads():
+
+    def func(x):
+        return jnp.sum(x**2)
+
+    amp_func = amp(func)
+
+    grad = jax.grad(amp_func)(jnp.ones(4, dtype=jnp.float32))
+
+
+    assert grad.dtype == jnp.float32
+
 def test_static():
     key = PRNGKey(0)
     bn, state = eqx.nn.make_with_state(eqx.nn.BatchNorm)(
@@ -147,7 +159,7 @@ def test_dynamic_scaler(tx, f, aux):
 
     x = jnp.array(2.0, dtype=jnp.float16)
 
-    scaler_state = DynamicScalerState(scaler=2**15, patience=10)
+    scaler_state = DynamicScalerState(patience=10)
     grad_fn = jax.jit(transform(func, filter=f, has_aux=aux, redo_on_nan=100))
     scaler_state, g = grad_fn(x, dynamic_scaler_state=scaler_state)
     if tx == "value_and_grad" and aux:
@@ -163,6 +175,7 @@ def test_dynamic_scaler(tx, f, aux):
     assert jnp.allclose(g, 12.0)
     assert jnp.allclose(scaler_state.scaler, 2**12)
     assert jnp.allclose(scaler_state.count, 1.0)
+    assert scaler_state.scaler.dtype == jnp.float32
 
     for i in range(9):
         scaler_state, g = grad_fn(x, dynamic_scaler_state=scaler_state)

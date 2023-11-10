@@ -18,7 +18,7 @@ pip install jaxamp
 
 TL;DR: Like [pytorch amp](https://pytorch.org/docs/stable/amp.html), but for JAX.
 
-Replace `loss_fn(model, minibatch)` with `jaxamp.amp(loss_fn)(model,minibatch)` to run with with [mixed precision](https://docs.nvidia.com/deeplearning/performance/mixed-precision-training/index.html). Use `scaler_state = jaxamp.DynamicScalerState()` and `jaxamp.dynamic_scale_grad` or `jaxamp.dynamic_scale_value_and_grad` to apply a dynamic loss scaler:
+Replace `loss_fn(model, minibatch)` with `jaxamp.amp(loss_fn)(model, minibatch)` to run with with [mixed precision](https://docs.nvidia.com/deeplearning/performance/mixed-precision-training/index.html). Use `scaler_state = jaxamp.DynamicScalerState()` and `jaxamp.dynamic_scale_grad` or `jaxamp.dynamic_scale_value_and_grad` to apply a dynamic loss scaler:
 ```python
 def loss(model, minibatch):
   ...
@@ -127,10 +127,6 @@ def use_compute_precision(
     *invars: Sequence[Any],
     **bind_params: Dict[str, Any]
 ) -> (Sequence[Any], Dict[str, Any]):
-    for invar in invars:
-        # if anything is an integer, let's not cast anything.
-        if not eqx.is_inexact_array(invar):
-            return invars, bind_params
     invars = cast_tree(compute_dtype, invars)
     bind_params = cast_tree(compute_dtype, bind_params)
     bind_params = dict(bind_params)
@@ -144,6 +140,24 @@ Otherwise it  will cast the inputs to their original values and apply the op unc
 is executed inside a scope declared with `jax.named_scope`, we will apply the  specified transformation function. If two or more active scopes match policies in `amp_policy` the *outermost* scope is used. There are two special scopes `"amp_step"` and `"amp_default"`.
 By default these both stop any automatic mixed precision from happening inside them.
 
+
+## Selectively Disabling AMP
+
+You can disable `amp` for a specific function (or area of code) using the context/decorator `jaxamp.amp_stop`:
+```
+@jaxamp.amp_stop
+def high_precision_matmul(W, x):
+    return jnp.dot(W, x)
+
+def high_precision_with_context(W, x):
+    # will be low precision
+    y = jnp.dot(W, x)
+    
+    with jaxamp.amp_stop():
+        # in fp32 precision
+        z = jnp.dot(W, y)
+    return z
+```
 
 ### More details on dynamic loss scalers
 

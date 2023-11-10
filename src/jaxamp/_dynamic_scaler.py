@@ -12,6 +12,7 @@ from functools import wraps
 from jax import core
 from jax import lax
 from jax._src.util import safe_map
+import equinox as eqx
 
 
 def all_finite(tree: PyTree) -> jax.Array:
@@ -25,25 +26,50 @@ def all_finite(tree: PyTree) -> jax.Array:
 
 class DynamicScalerState(NamedTuple):
     patience: jax.Array = jnp.array(
-        2000
+        2000, dtype=jnp.int32
     )  # number of non-inf/NaN iterations to wait before increasing the scaler
     adjust_factor: jax.Array = jnp.array(
-        2.0
+        2.0, dtype=jnp.float32
     )  # When increasing or decreasing the scaler, multiply or divide by this factor.
     scaler: jax.Array = jnp.array(2**15, dtype=jnp.float32)  # current scaler value
     count: jax.Array = jnp.array(
-        0
+        0, dtype=jnp.int32
     )  # number of non-inf/NaN iterations since the scaler was last increased.
+    total_resets: jax.Array = jnp.array(
+        0, dtype=jnp.int32
+    )  # total number of times we have seen NaN/inf.
+
+
+def set_scaler_types(scaler_state):
+    patience = jnp.array(scaler_state.patience).astype(jnp.int32)
+    count = jnp.array(scaler_state.count).astype(jnp.int32)
+    total_resets = jnp.array(scaler_state.total_resets).astype(jnp.int32)
+
+    dtype = jnp.float32
+    if eqx.is_inexact_array(scaler_state.scaler):
+        dtype = scaler_state.scaler.dtype
+    scaler = jnp.array(scaler_state.scaler).astype(dtype)
+    adjust_factor = jnp.array(scaler_state.adjust_factor).astype(dtype)
+
+    return DynamicScalerState(patience, adjust_factor, scaler, count, total_resets)
 
 
 def increment_state(state: DynamicScalerState) -> DynamicScalerState:
     new_state = jax.lax.cond(
         state.count >= state.patience,
         lambda state: DynamicScalerState(
-            state.patience, state.adjust_factor, state.scaler * state.adjust_factor, 0.0
+            state.patience,
+            state.adjust_factor,
+            state.scaler * state.adjust_factor,
+            0,
+            state.total_resets,
         ),
         lambda state: DynamicScalerState(
-            state.patience, state.adjust_factor, state.scaler, state.count + 1.0
+            state.patience,
+            state.adjust_factor,
+            state.scaler,
+            state.count + 1,
+            state.total_resets,
         ),
         state,
     )
@@ -53,7 +79,11 @@ def increment_state(state: DynamicScalerState) -> DynamicScalerState:
 
 def decrease_scaler(state: DynamicScalerState) -> DynamicScalerState:
     return DynamicScalerState(
-        state.patience, state.adjust_factor, state.scaler / state.adjust_factor, 0.0
+        state.patience,
+        state.adjust_factor,
+        state.scaler / state.adjust_factor,
+        0,
+        state.total_resets + 1,
     )
 
 
@@ -103,9 +133,7 @@ def dynamic_scale_tx(
         ):
             # avoid type mismatch complaints later in case state is initialized
             # with raw python ints/floats
-            state = jtu.tree_map(
-                lambda x: jnp.array(x).astype(jnp.float32), dynamic_scaler_state
-            )
+            state = set_scaler_types(dynamic_scaler_state)
 
             results = transformed_fn(*f_args, _dynamic_scaler_state=state, **f_kwargs)
 
@@ -157,14 +185,9 @@ def dynamic_scale_tx(
 
 
 def dynamic_scale_grad(
-    fun: Callable,
-    *,
-    has_aux: bool = False,
-    redo_on_nan: int = 0,
-    filter=True,
-    **kwargs
+    fun: Callable, *, has_aux: bool = False, redo_on_nan: int = 0, filter=True, **kwargs
 ):
-    '''
+    """
     apply dynamic scaler to the grad function.
 
     Args:
@@ -180,7 +203,7 @@ def dynamic_scale_grad(
             1. has an extra required keyword argument dynamic_scaler_state
             2. the return value is now a tuple (next_dynamic_scaler_state, grads)
                 of (next_dynamic_scaler_state, (grads, aux)) if has_aux=True
-    '''
+    """
     if has_aux:
         unscale_fn = grad_aux_unscale_fn
     else:
@@ -205,7 +228,7 @@ def dynamic_scale_value_and_grad(
     filter=True,
     **kwargs
 ):
-    '''
+    """
     apply dynamic scaler to the value_and_grad function.
 
     Args:
@@ -221,7 +244,7 @@ def dynamic_scale_value_and_grad(
             1. has an extra required keyword argument dynamic_scaler_state
             2. the return value is now a tuple (next_dynamic_scaler_state, (value, grads))
                 of (next_dynamic_scaler_state, ((value, aux), grads)) if has_aux=True
-    '''
+    """
     if has_aux:
         unscale_fn = value_and_grad_aux_unscale_fn
     else:
